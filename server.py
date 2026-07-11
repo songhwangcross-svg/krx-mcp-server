@@ -20,37 +20,7 @@ from typing import List, Optional
 from mcp.server.fastmcp import FastMCP
 from pykrx import stock
 
-# 이 서버는 localhost가 아니라 실제 도메인(예: onrender.com)으로 배포되므로,
-# MCP SDK의 기본 DNS-리바인딩 방지 Host 헤더 검사를 완화해야 합니다.
-# (그대로 두면 "Invalid Host header" 경고와 함께 421 Misdirected Request로 막힙니다.)
-try:
-    from mcp.server.transport_security import TransportSecuritySettings
-
-    _transport_security = TransportSecuritySettings(
-        enabled=False,
-        allowed_hosts=["*"],
-        allowed_origins=["*"],
-    )
-except ImportError:
-    # 설치된 mcp 패키지 버전에 이 모듈이 없을 수도 있어 안전하게 무시합니다.
-    _transport_security = None
-
-mcp = None
-if _transport_security is not None:
-    try:
-        mcp = FastMCP("krx-price-server", transport_security=_transport_security)
-    except TypeError:
-        # 설치된 버전의 FastMCP 생성자가 transport_security 인자를 받지 않는 경우,
-        # 생성 후 settings 객체에 직접 넣어보는 방식으로 재시도합니다.
-        mcp = FastMCP("krx-price-server")
-        for attr_holder in (mcp, getattr(mcp, "settings", None)):
-            if attr_holder is not None and hasattr(attr_holder, "transport_security"):
-                try:
-                    setattr(attr_holder, "transport_security", _transport_security)
-                except Exception:
-                    pass
-if mcp is None:
-    mcp = FastMCP("krx-price-server")
+mcp = FastMCP("krx-price-server")
 
 
 def _latest_business_day(base: Optional[str] = None) -> str:
@@ -157,10 +127,33 @@ def get_latest_business_day() -> dict:
     return {"date": _latest_business_day()}
 
 
+class _HostHeaderRewriteMiddleware:
+    """MCP SDK에는 DNS 리바인딩 공격을 막기 위해 Host 헤더가 localhost 계열일 때만
+    통과시키는 내부 보안 검사가 있습니다. 이 서버는 실제 도메인(onrender.com 등)으로
+    배포되므로 그 검사에서 항상 421로 막히는데, 버전에 따라 이 검사를 끄는 설정 API가
+    다르거나 없을 수 있어 더 확실한 방법으로 우회합니다: 요청이 내부 앱에 도달하기 전에
+    Host 헤더 값을 "localhost"로 바꿔치기합니다."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http":
+            scope = dict(scope)
+            scope["headers"] = [
+                (b"host", b"localhost") if k.lower() == b"host" else (k, v)
+                for k, v in scope.get("headers", [])
+            ]
+        await self.app(scope, receive, send)
+
+
 if __name__ == "__main__":
+    import uvicorn
+
     port = int(os.environ.get("PORT", "8000"))
-    mcp.settings.host = "0.0.0.0"
-    mcp.settings.port = port
     # 최종 접속 URL은 http(s)://<host>:<port>/mcp 형태가 됩니다.
     mcp.settings.streamable_http_path = "/mcp"
-    mcp.run(transport="streamable-http")
+
+    raw_app = mcp.streamable_http_app()
+    app = _HostHeaderRewriteMiddleware(raw_app)
+    uvicorn.run(app, host="0.0.0.0", port=port)
