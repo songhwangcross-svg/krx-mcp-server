@@ -115,4 +115,52 @@ def get_closing_prices_bulk(tickers: List[str], date: str = "") -> List[dict]:
     포트폴리오 전체(예: 보유 국내 종목 13개)의 종가를 한 번의 호출로 가져올 때 사용하세요.
 
     Args:
-        tickers: 6자리
+        tickers: 6자리 종목코드 리스트 (예: ["005930", "034730", "263860"])
+        date: 조회일 YYYYMMDD 형식. 비워두면 가장 최근 거래일 기준으로 조회합니다.
+
+    Returns:
+        get_closing_price와 동일한 형식의 dict 리스트 (요청한 순서 유지).
+    """
+    target = date or _latest_business_day()
+    return [get_closing_price(t, target) for t in tickers]
+
+
+@mcp.tool()
+def get_market_cap(ticker: str, date: str = "") -> dict:
+    """지정한 종목코드의 시가총액·상장주식수 정보를 반환합니다.
+
+    Args:
+        ticker: 6자리 종목코드
+        date: 조회일 YYYYMMDD 형식. 비워두면 가장 최근 거래일 기준으로 조회합니다.
+    """
+    target = date or _latest_business_day()
+    try:
+        df = stock.get_market_cap(target, target, ticker)
+    except Exception as e:
+        return {"ticker": ticker, "date": target, "error": f"조회 실패: {e}"}
+
+    if df is None or df.empty:
+        return {"ticker": ticker, "date": target, "error": "해당일 데이터 없음"}
+
+    row = df.iloc[0]
+    return {
+        "ticker": ticker,
+        "date": target,
+        "market_cap": int(row["시가총액"]),
+        "shares_outstanding": int(row["상장주식수"]),
+    }
+
+
+@mcp.tool()
+def get_latest_business_day() -> dict:
+    """가장 최근 거래일(YYYYMMDD)을 반환합니다. 오늘이 휴장일이면 직전 거래일을 반환합니다."""
+    return {"date": _latest_business_day()}
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", "8000"))
+    mcp.settings.host = "0.0.0.0"
+    mcp.settings.port = port
+    # 최종 접속 URL은 http(s)://<host>:<port>/mcp 형태가 됩니다.
+    mcp.settings.streamable_http_path = "/mcp"
+    mcp.run(transport="streamable-http")
